@@ -98,7 +98,7 @@ npm start
 When server starts successfully, you should see:
 
 ```bash
-Nebula Chat is running on port 3000
+Chat is running on port 3000
 ```
 
 Open in browser:
@@ -142,27 +142,6 @@ Notes:
   - `GET /api/providers`
 - Health check:
   - `GET /api/health`
-
----
-
-## Security Notes
-
-- This app does **not** call upstream model APIs directly from browser JavaScript.
-- Requests are proxied through your local backend server.
-- Do not commit real secrets; `.env` is ignored by `.gitignore`.
-
----
-
-## Demo Checklist (Suggested)
-
-For a short assignment demo, you can show:
-
-1. Switch provider/model.
-2. Edit system prompt.
-3. Adjust API parameters.
-4. Enable streaming and send a prompt.
-5. Ask a follow-up question to show short-term memory.
-6. Show one special feature (e.g., summary card / branch / export).
 
 ---
 
