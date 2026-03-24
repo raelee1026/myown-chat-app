@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MyOwn Chat</title>
+    <meta
+      name="description"
+      content="OpenAI-compatible chat playground with model switch, system prompt, parameters, streaming, and short-term memory."
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .summary-card-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        z-index: 999;
+      }
+      .summary-card {
+        width: min(760px, 96vw);
+        max-height: 82vh;
+        overflow: auto;
+        background: #111827;
+        color: #f3f4f6;
+        border: 1px solid #374151;
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+      }
+      .summary-card__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      .summary-card__title {
+        margin: 0;
+        font-size: 16px;
+      }
+      .summary-card__content {
+        white-space: pre-wrap;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .message__header-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .message__branch-btn {
+        border: 1px solid #4b5563;
+        background: transparent;
+        color: inherit;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        cursor: pointer;
+        opacity: 0.85;
+      }
+      .message__branch-btn:hover {
+        opacity: 1;
+      }
+      .message__branch-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand__icon">AI</div>
+          <div>
+            <h1>MyOwn Chat</h1>
+            <p>OpenAI-compatible chat playground</p>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="panel__title">Conversations</div>
+          <div class="button-row">
+            <button type="button" class="button button--ghost" id="newConversationBtn">
+              New Chat
+            </button>
+          </div>
+          <div id="conversationList" class="conversation-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel__title">Model Settings</div>
+
+          <label class="field">
+            <span>Provider</span>
+            <select id="providerSelect"></select>
+          </label>
+
+          <label class="field">
+            <span>Model</span>
+            <input id="modelInput" list="modelSuggestions" placeholder="e.g. gpt-4o-mini" />
+            <datalist id="modelSuggestions"></datalist>
+          </label>
+
+          <label class="field">
+            <span>API Key</span>
+            <input
+              id="apiKeyInput"
+              type="password"
+              placeholder="Paste API key (stored in browser only)"
+              autocomplete="off"
+            />
+          </label>
+
+          <div class="provider-meta" id="providerMeta">Loading...</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel__title">System Prompt</div>
+          <label class="field">
+            <textarea
+              id="systemPrompt"
+              rows="8"
+              placeholder="You are a helpful assistant..."
+            ></textarea>
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel__title">Common API Parameters</div>
+
+          <label class="field field--range">
+            <div class="field__row">
+              <span>Temperature</span>
+              <output id="temperatureValue"></output>
+            </div>
+            <input type="range" id="temperatureInput" min="0" max="2" step="0.1" />
+          </label>
+
+          <label class="field field--range">
+            <div class="field__row">
+              <span>Top P</span>
+              <output id="topPValue"></output>
+            </div>
+            <input type="range" id="topPInput" min="0" max="1" step="0.05" />
+          </label>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>Max Tokens</span>
+              <input type="number" id="maxTokensInput" min="1" step="1" />
+            </label>
+
+            <label class="field">
+              <span>Memory Turns</span>
+              <input type="number" id="memoryTurnsInput" min="1" max="20" step="1" />
+            </label>
+
+            <label class="field">
+              <span>Presence Penalty</span>
+              <input
+                type="number"
+                id="presencePenaltyInput"
+                min="-2"
+                max="2"
+                step="0.1"
+              />
+            </label>
+
+            <label class="field">
+              <span>Frequency Penalty</span>
+              <input
+                type="number"
+                id="frequencyPenaltyInput"
+                min="-2"
+                max="2"
+                step="0.1"
+              />
+            </label>
+          </div>
+
+          <label class="toggle">
+            <input type="checkbox" id="streamToggle" />
+            <span>Enable Streaming</span>
+          </label>
+
+          <div class="button-row">
+            <button type="button" class="button button--ghost" id="resetSettingsBtn">
+              Reset
+            </button>
+          </div>
+        </section>
+
+      </aside>
+
+      <main class="chat">
+        <header class="chat__header">
+          <div>
+            <h2>Chat</h2>
+            <p id="chatStatus">
+              Switch models, tune prompt and parameters, stream outputs, and keep short memory.
+            </p>
+          </div>
+
+          <div class="button-row">
+            <div class="theme-switcher" role="group" aria-label="Theme selector">
+              <span>Theme</span>
+              <button type="button" class="theme-switcher__btn" id="themeToggleBtn">
+                Nebula
+              </button>
+            </div>
+            <button type="button" class="button button--ghost" id="downloadBtn">
+              Export Chat
+            </button>
+            <button type="button" class="button button--ghost" id="summaryCardBtn">
+              Summary
+            </button>
+            <button type="button" class="button button--ghost" id="newChatBtn">
+              New Chat
+            </button>
+          </div>
+        </header>
+
+        <div id="errorBanner" class="error-banner hidden"></div>
+
+        <div id="summaryCardOverlay" class="summary-card-overlay hidden" aria-hidden="true">
+          <section class="summary-card" role="dialog" aria-modal="true" aria-labelledby="summaryCardTitle">
+            <div class="summary-card__header">
+              <h3 id="summaryCardTitle" class="summary-card__title">Summary</h3>
+              <button type="button" class="button button--ghost" id="summaryCardCloseBtn">Close</button>
+            </div>
+            <div id="summaryCardContent" class="summary-card__content"></div>
+          </section>
+        </div>
+
+        <section id="messages" class="messages" aria-live="polite"></section>
+
+        <form id="composerForm" class="composer">
+          <label class="composer__input">
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="Type a message, Enter to send, Shift + Enter for newline"
+            ></textarea>
+          </label>
+
+          <div class="composer__actions">
+            <button type="button" class="button button--ghost" id="stopBtn" disabled>
+              Stop
+            </button>
+            <button type="submit" class="button button--primary" id="sendBtn">
+              Send
+            </button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <template id="emptyStateTemplate">
+      <div class="empty-state">
+        <div class="empty-state__icon">💬</div>
+        <h3>Start your first conversation</h3>
+        <p>
+          Use the left panel to switch provider/model, edit the system prompt, and tune parameters.
+        </p>
+      </div>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

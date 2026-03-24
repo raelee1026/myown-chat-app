@@ -1,0 +1,11 @@
+{
+  "name": "hw01-my-chatgpt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HW01",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}
