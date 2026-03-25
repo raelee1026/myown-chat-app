@@ -132,19 +132,6 @@ Notes:
 
 ---
 
-## API Flow
-
-- Frontend sends chat requests to:
-  - `POST /api/chat`
-- Backend forwards to upstream provider:
-  - `{BASE_URL}/chat/completions`
-- Provider metadata endpoint:
-  - `GET /api/providers`
-- Health check:
-  - `GET /api/health`
-
----
-
 ## Tech Notes
 
 - `server.js`: static file serving, provider config, chat proxy, parameter filtering, streaming relay.
