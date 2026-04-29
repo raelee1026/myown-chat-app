@@ -438,50 +438,6 @@ This endpoint is intentionally lightweight and local, making it easy to test dur
 
 ---
 
-## Auto Demo
-
-The project includes a hidden auto demo runner in `public/auto-demo.js`.
-
-### Start via URL
-
-```text
-http://localhost:3000/?demo=auto
-```
-
-### Start via browser console
-
-```js
-runAutoDemo()
-```
-
-### What it demonstrates
-
-- provider / model switching
-- system prompt setup
-- long-term memory interactions
-- auto routing
-- multimodal input
-- tool use
-- MCP background calls
-- multiple chats
-- summary / export / theme switching
-
-The voice demo is intentionally left for manual presentation.
-
----
-
-## Demo Guide
-
-For the full presentation flow, see:
-
-- [demo-script.md](./demo-script.md)
-
-For the short written report, see:
-
-- [report.md](./report.md)
-
----
-
 ## Common Demo Prompts
 
 ### Long-term memory
