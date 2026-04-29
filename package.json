@@ -1,11 +1,12 @@
 {
-  "name": "hw01-my-chatgpt",
-  "version": "1.0.0",
+  "name": "hw02-myown-chat",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "HW01",
+  "description": "HW2 OpenAI-compatible chat app with long-term memory, multimodal input, auto routing, tools, and MCP demo endpoints.",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check public/app.js"
   }
 }

@@ -3,75 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MyOwn Chat</title>
+    <title>HW2 MyOwn Chat</title>
     <meta
       name="description"
-      content="OpenAI-compatible chat playground with model switch, system prompt, parameters, streaming, and short-term memory."
+      content="HW2 OpenAI-compatible chat playground with long-term memory, multimodal input, auto routing, tool use, and MCP."
     />
     <link rel="stylesheet" href="/styles.css" />
-    <style>
-      .summary-card-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.45);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 16px;
-        z-index: 999;
-      }
-      .summary-card {
-        width: min(760px, 96vw);
-        max-height: 82vh;
-        overflow: auto;
-        background: #111827;
-        color: #f3f4f6;
-        border: 1px solid #374151;
-        border-radius: 12px;
-        padding: 16px;
-        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
-      }
-      .summary-card__header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 8px;
-      }
-      .summary-card__title {
-        margin: 0;
-        font-size: 16px;
-      }
-      .summary-card__content {
-        white-space: pre-wrap;
-        line-height: 1.5;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-
-      .message__header-actions {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .message__branch-btn {
-        border: 1px solid #4b5563;
-        background: transparent;
-        color: inherit;
-        border-radius: 999px;
-        padding: 2px 8px;
-        font-size: 12px;
-        line-height: 1.4;
-        cursor: pointer;
-        opacity: 0.85;
-      }
-      .message__branch-btn:hover {
-        opacity: 1;
-      }
-      .message__branch-btn:disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-    </style>
   </head>
   <body>
     <div class="app-shell">
@@ -79,8 +16,8 @@
         <div class="brand">
           <div class="brand__icon">AI</div>
           <div>
-            <h1>MyOwn Chat</h1>
-            <p>OpenAI-compatible chat playground</p>
+            <h1>HW2 MyOwn Chat</h1>
+            <p>Memory · multimodal · routing · tools · MCP</p>
           </div>
         </div>
 
@@ -94,7 +31,7 @@
           <div id="conversationList" class="conversation-list"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="providerPanel">
           <div class="panel__title">Model Settings</div>
 
           <label class="field">
@@ -103,25 +40,96 @@
           </label>
 
           <label class="field">
-            <span>Model</span>
+            <span>Manual / fallback model</span>
             <input id="modelInput" list="modelSuggestions" placeholder="e.g. gpt-4o-mini" />
             <datalist id="modelSuggestions"></datalist>
-          </label>
-
-          <label class="field">
-            <span>API Key</span>
-            <input
-              id="apiKeyInput"
-              type="password"
-              placeholder="Paste API key (stored in browser only)"
-              autocomplete="off"
-            />
           </label>
 
           <div class="provider-meta" id="providerMeta">Loading...</div>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="routingPanel">
+          <div class="panel__title">Auto Routing</div>
+          <label class="field">
+            <span>Routing Mode</span>
+            <select id="routingModeSelect">
+              <option value="manual">Manual selected model</option>
+              <option value="auto">Auto route by task</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Fallback profile</span>
+            <select id="routeProfileSelect">
+              <option value="balanced">Balanced</option>
+              <option value="fast">Fast</option>
+              <option value="reasoning">Reasoning</option>
+              <option value="vision">Vision</option>
+              <option value="tool">Tool</option>
+            </select>
+          </label>
+
+          <div class="provider-meta" id="routeDecision">Manual mode: selected provider/model will be used.</div>
+        </section>
+
+        <section class="panel" id="toolsPanel">
+          <div class="panel__title">Tool Use & MCP</div>
+          <label class="toggle">
+            <input type="checkbox" id="toolsToggle" />
+            <span>Enable local tool calling</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="mcpToggle" />
+            <span>Enable MCP context</span>
+          </label>
+          <div id="toolList" class="tool-list"></div>
+          <p class="mini-note">MCP demo endpoints: <code>GET /mcp/manifest</code> and <code>POST /mcp</code>.</p>
+          <div class="button-row button-row--compact">
+            <button type="button" class="button button--ghost button--sm" data-tool-demo="Use the calculator tool to compute sqrt(144) + 7 * 3, then explain the answer.">
+              Calc demo
+            </button>
+            <button type="button" class="button button--ghost button--sm" data-tool-demo="Use a tool to tell me the current time in Asia/Taipei and format it for a meeting note.">
+              Time demo
+            </button>
+            <button type="button" class="button button--ghost button--sm" data-tool-demo="Search my long-term memory for my preferences, then suggest a short demo plan.">
+              Memory demo
+            </button>
+          </div>
+        </section>
+
+        <section class="panel" id="memoryPanel">
+          <div class="panel__title panel__title--row">
+            <span>Long-term Memory</span>
+            <span id="memoryCount" class="panel__badge">0 saved</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="memoryToggle" />
+            <span>Use memory in prompts</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="autoMemoryToggle" />
+            <span>Auto-save obvious preferences</span>
+          </label>
+          <label class="field">
+            <span>Relevant memory limit</span>
+            <input type="number" id="maxLongTermMemoriesInput" min="1" step="1" />
+          </label>
+          <label class="field">
+            <span>Add memory</span>
+            <textarea id="memoryInput" rows="3" placeholder="Example: Remember that I prefer concise Chinese explanations for demos."></textarea>
+          </label>
+          <div class="button-row button-row--compact">
+            <button type="button" class="button button--primary button--sm" id="addMemoryBtn">Save Memory</button>
+            <button type="button" class="button button--ghost button--sm" id="clearMemoriesBtn">Clear</button>
+          </div>
+          <label class="field field--compact">
+            <span>Search memory</span>
+            <input id="memorySearchInput" placeholder="filter memories" />
+          </label>
+          <div id="memoryList" class="memory-list"></div>
+        </section>
+
+        <section class="panel" id="systemPromptPanel">
           <div class="panel__title">System Prompt</div>
           <label class="field">
             <textarea
@@ -132,7 +140,7 @@
           </label>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="parametersPanel">
           <div class="panel__title">Common API Parameters</div>
 
           <label class="field field--range">
@@ -158,7 +166,7 @@
             </label>
 
             <label class="field">
-              <span>Memory Turns</span>
+              <span>Short Memory Turns</span>
               <input type="number" id="memoryTurnsInput" min="1" max="20" step="1" />
             </label>
 
@@ -196,7 +204,6 @@
             </button>
           </div>
         </section>
-
       </aside>
 
       <main class="chat">
@@ -204,7 +211,7 @@
           <div>
             <h2>Chat</h2>
             <p id="chatStatus">
-              Switch models, tune prompt and parameters, stream outputs, and keep short memory.
+              Switch models, add memory, attach images/files, route automatically, and use tools.
             </p>
           </div>
 
@@ -242,15 +249,28 @@
         <section id="messages" class="messages" aria-live="polite"></section>
 
         <form id="composerForm" class="composer">
-          <label class="composer__input">
-            <textarea
-              id="messageInput"
-              rows="1"
-              placeholder="Type a message, Enter to send, Shift + Enter for newline"
-            ></textarea>
-          </label>
+          <div class="composer__main">
+            <div id="attachmentPreview" class="attachment-preview hidden"></div>
+            <label class="composer__input">
+              <textarea
+                id="messageInput"
+                rows="1"
+                placeholder="Type a message, attach image/text, Enter to send, Shift + Enter for newline"
+              ></textarea>
+            </label>
+            <input
+              id="attachmentInput"
+              type="file"
+              accept="image/*,.txt,.md,.markdown,.csv,.json,.js,.ts,.py,.html,.css,.xml,.yaml,.yml"
+              multiple
+              hidden
+            />
+          </div>
 
           <div class="composer__actions">
+            <button type="button" class="button button--ghost" id="attachBtn">Attach</button>
+            <button type="button" class="button button--ghost" id="clearAttachmentsBtn">Clear</button>
+            <button type="button" class="button button--ghost" id="voiceBtn">Voice</button>
             <button type="button" class="button button--ghost" id="stopBtn" disabled>
               Stop
             </button>
@@ -264,10 +284,10 @@
 
     <template id="emptyStateTemplate">
       <div class="empty-state">
-        <div class="empty-state__icon">💬</div>
-        <h3>Start your first conversation</h3>
+        <div class="empty-state__icon">🚀</div>
+        <h3>HW2 demo-ready chat</h3>
         <p>
-          Use the left panel to switch provider/model, edit the system prompt, and tune parameters.
+          Try adding a memory, turning on auto routing, attaching an image, or enabling tools and using the calculator/time demo prompts.
         </p>
       </div>
     </template>
@@ -275,5 +295,6 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
     <script src="/app.js" type="module"></script>
+    <script src="/auto-demo.js" type="module"></script>
   </body>
 </html>

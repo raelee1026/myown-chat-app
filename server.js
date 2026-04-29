@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, readFileSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
@@ -12,7 +12,9 @@ const ENV_PATH = join(__dirname, '.env');
 loadEnvFile(ENV_PATH);
 
 const PORT = Number(process.env.PORT || 3000);
-const MAX_BODY_SIZE = Number(process.env.MAX_BODY_SIZE || 2_000_000);
+const MAX_BODY_SIZE = Number(process.env.MAX_BODY_SIZE || 18_000_000);
+const DEFAULT_TIME_ZONE = process.env.DEFAULT_TIME_ZONE || 'Asia/Taipei';
+const MAX_TOOL_LOOPS = Number(process.env.MAX_TOOL_LOOPS || 3);
 
 function splitList(value, fallback = []) {
   if (!value) return fallback;
@@ -20,6 +22,15 @@ function splitList(value, fallback = []) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function firstMatchingModel(models, patterns, fallback) {
+  const normalizedPatterns = patterns.map((pattern) => String(pattern).toLowerCase());
+  return (
+    models.find((model) =>
+      normalizedPatterns.some((pattern) => String(model).toLowerCase().includes(pattern))
+    ) || fallback
+  );
 }
 
 function loadEnvFile(filePath) {
@@ -49,25 +60,75 @@ function loadEnvFile(filePath) {
 }
 
 function getProviders() {
+  const openaiModels = splitList(process.env.OPENAI_MODELS, [
+    'gpt-4o-mini',
+    'gpt-4o',
+    'gpt-4.1-mini',
+    'gpt-4.1',
+  ]);
+  const clubModels = splitList(process.env.CLUB_MODELS, ['qwen35-397b', 'qwen35-4b']);
+
+  const openaiFast = process.env.OPENAI_FAST_MODEL || openaiModels[0] || 'gpt-4o-mini';
+  const openaiBalanced = process.env.OPENAI_BALANCED_MODEL || openaiModels[1] || openaiFast;
+  const openaiReasoning =
+    process.env.OPENAI_REASONING_MODEL ||
+    firstMatchingModel(openaiModels, ['4.1', 'o3', 'reason', 'gpt-4o'], openaiBalanced);
+  const openaiVision =
+    process.env.OPENAI_VISION_MODEL ||
+    openaiModels.find((model) => String(model).toLowerCase() === 'gpt-4o') ||
+    firstMatchingModel(openaiModels, ['vision', '4o'], openaiBalanced);
+  const openaiTool = process.env.OPENAI_TOOL_MODEL || openaiFast;
+
+  const clubFast = process.env.CLUB_FAST_MODEL || clubModels[1] || clubModels[0] || '';
+  const clubBalanced = process.env.CLUB_BALANCED_MODEL || clubModels[0] || clubFast;
+  const clubReasoning =
+    process.env.CLUB_REASONING_MODEL ||
+    firstMatchingModel(clubModels, ['397b', 'reason', 'qwen35'], clubBalanced);
+  const clubVision = process.env.CLUB_VISION_MODEL || clubBalanced;
+  const clubTool = process.env.CLUB_TOOL_MODEL || clubFast || clubBalanced;
+
   return {
     openai: {
       id: 'openai',
       name: 'OpenAI',
       baseUrl: process.env.OPENAI_BASE_URL || '',
+      apiKey: process.env.OPENAI_API_KEY || '',
       requiresKey: true,
-      models: splitList(process.env.OPENAI_MODELS, [
-        'gpt-4o-mini',
-        'gpt-4o',
-        'gpt-4.1-mini',
-        'gpt-4.1',
-      ]),
+      models: openaiModels,
+      routes: {
+        fast: openaiFast,
+        balanced: openaiBalanced,
+        reasoning: openaiReasoning,
+        vision: openaiVision,
+        tool: openaiTool,
+      },
+      capabilities: {
+        text: true,
+        vision: true,
+        tools: true,
+        mcp: true,
+      },
     },
     club: {
       id: 'club',
       name: 'NYCU Club',
       baseUrl: process.env.CLUB_BASE_URL || '',
+      apiKey: process.env.CLUB_API_KEY || '',
       requiresKey: false,
-      models: splitList(process.env.CLUB_MODELS, ['qwen35-397b', 'qwen35-4b']),
+      models: clubModels,
+      routes: {
+        fast: clubFast,
+        balanced: clubBalanced,
+        reasoning: clubReasoning,
+        vision: clubVision,
+        tool: clubTool,
+      },
+      capabilities: {
+        text: true,
+        vision: String(process.env.CLUB_SUPPORTS_VISION || '').toLowerCase() === 'true',
+        tools: true,
+        mcp: true,
+      },
     },
   };
 }
@@ -78,22 +139,31 @@ function publicProviders(providers) {
     name: provider.name,
     models: provider.models,
     requiresKey: provider.requiresKey,
+    hasServerKey: Boolean(String(provider.apiKey || '').trim()),
+    routes: provider.routes,
+    capabilities: provider.capabilities,
   }));
 }
 
-function sendJson(res, statusCode, data) {
+function headerJson(value) {
+  return encodeURIComponent(JSON.stringify(value));
+}
+
+function sendJson(res, statusCode, data, extraHeaders = {}) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    ...extraHeaders,
   });
   res.end(body);
 }
 
-function sendText(res, statusCode, text, contentType = 'text/plain; charset=utf-8') {
+function sendText(res, statusCode, text, contentType = 'text/plain; charset=utf-8', extraHeaders = {}) {
   res.writeHead(statusCode, {
     'Content-Type': contentType,
     'Content-Length': Buffer.byteLength(text),
+    ...extraHeaders,
   });
   res.end(text);
 }
@@ -115,7 +185,7 @@ function getContentType(filePath) {
   return map[ext] || 'application/octet-stream';
 }
 
-async function serveStatic(req, res, pathname) {
+async function serveStatic(_req, res, pathname) {
   let safePath = pathname === '/' ? '/index.html' : pathname;
   safePath = normalize(decodeURIComponent(safePath)).replace(/^(\.\.[/\\])+/, '');
 
@@ -153,7 +223,7 @@ async function readRequestBody(req) {
     req.on('data', (chunk) => {
       total += chunk.length;
       if (total > MAX_BODY_SIZE) {
-        reject(new Error('Request body too large'));
+        reject(new Error('Request body too large. Reduce attached image/file size.'));
         req.destroy();
         return;
       }
@@ -193,17 +263,792 @@ function buildChatUrl(baseUrl) {
   return `${String(baseUrl || '').replace(/\/$/, '')}/chat/completions`;
 }
 
+function getRequestText(messages = []) {
+  return messages
+    .map((message) => contentToText(message?.content))
+    .join('\n')
+    .trim();
+}
+
+function getLatestUserText(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return contentToText(messages[index].content);
+    }
+  }
+  return '';
+}
+
+function getLatestUserMessage(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return messages[index];
+    }
+  }
+  return null;
+}
+
+function contentToText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (part?.type === 'text') return part.text || '';
+      if (part?.type === 'image_url') return '[image]';
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function hasImageContent(messages = []) {
+  return messages.some((message) =>
+    Array.isArray(message?.content)
+      ? message.content.some((part) => part?.type === 'image_url')
+      : false
+  );
+}
+
+function messageHasImageContent(message) {
+  return Array.isArray(message?.content)
+    ? message.content.some((part) => part?.type === 'image_url')
+    : false;
+}
+
+function decideRoute({ messages, routing = {}, toolsEnabled = false, mcpEnabled = false }) {
+  const latestUserMessage = getLatestUserMessage(messages);
+  const latestText = getLatestUserText(messages).toLowerCase();
+  const allText = getRequestText(messages).toLowerCase();
+  const looksToolLike =
+    /\b(calculate|calculator|compute|math|time now|current time|convert|statistics|word count|tool|mcp)\b/.test(
+      latestText
+    ) || /計算|現在幾點|時間|換算|統計|工具|函式|函數/.test(latestText);
+  const requestedFallback = ['fast', 'balanced', 'reasoning', 'vision', 'tool'].includes(
+    routing.profile
+  )
+    ? routing.profile
+    : 'balanced';
+
+  if (messageHasImageContent(latestUserMessage)) {
+    return {
+      route: 'vision',
+      reason: 'image or visual attachment detected',
+    };
+  }
+
+  if (mcpEnabled && looksToolLike) {
+    return {
+      route: 'tool',
+      reason: 'MCP-enabled tool request',
+    };
+  }
+
+  if (toolsEnabled && looksToolLike) {
+    return {
+      route: 'tool',
+      reason: 'query looks like a tool-friendly request',
+    };
+  }
+
+  if (looksToolLike) {
+    return {
+      route: 'tool',
+      reason: 'query looks like a tool-friendly request',
+    };
+  }
+
+  if (
+    /\b(reason|analyze|debug|prove|derive|plan|architecture|compare|trade[- ]?off|complex|step by step|code review)\b/.test(
+      allText
+    ) ||
+    /分析|推理|證明|除錯|架構|比較|規劃|詳細/.test(allText) ||
+    allText.length > 1600
+  ) {
+    return {
+      route: 'reasoning',
+      reason: 'query appears to need deeper reasoning or longer context',
+    };
+  }
+
+  if (latestText.length > 0 && latestText.length < 220) {
+    return {
+      route: 'fast',
+      reason: 'short text-only request',
+    };
+  }
+
+  return {
+    route: requestedFallback,
+    reason: `fallback profile: ${requestedFallback}`,
+  };
+}
+
+function resolveRoute({ providerId, model, providers, routing = {}, messages, toolsEnabled, mcpEnabled }) {
+  const provider = providers[providerId] || Object.values(providers)[0];
+  const mode = routing?.mode === 'auto' ? 'auto' : 'manual';
+  const requestedModel = String(model || '').trim();
+
+  if (!provider) {
+    return {
+      provider: null,
+      model: requestedModel,
+      decision: {
+        mode,
+        route: 'manual',
+        reason: 'No provider configured',
+        model: requestedModel,
+        providerId,
+      },
+    };
+  }
+
+  if (mode !== 'auto') {
+    const selectedModel = requestedModel || provider.models?.[0] || '';
+    return {
+      provider,
+      model: selectedModel,
+      decision: {
+        mode,
+        route: 'manual',
+        reason: 'manual provider/model selected',
+        providerId: provider.id,
+        providerName: provider.name,
+        model: selectedModel,
+        requestedModel,
+        capabilities: provider.capabilities,
+      },
+    };
+  }
+
+  const routeInfo = decideRoute({ messages, routing, toolsEnabled, mcpEnabled });
+  const selectedModel =
+    provider.routes?.[routeInfo.route] ||
+    provider.routes?.balanced ||
+    requestedModel ||
+    provider.models?.[0] ||
+    '';
+
+  return {
+    provider,
+    model: selectedModel,
+    decision: {
+      mode,
+      route: routeInfo.route,
+      reason: routeInfo.reason,
+      providerId: provider.id,
+      providerName: provider.name,
+      model: selectedModel,
+      requestedModel,
+      requestedProviderId: providerId,
+      capabilities: provider.capabilities,
+      hasImages: hasImageContent(messages),
+      toolsEnabled: Boolean(toolsEnabled),
+      mcpEnabled: Boolean(mcpEnabled),
+    },
+  };
+}
+
+function resolveApiKey(provider, providerId, apiKey, apiKeys) {
+  const directKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  if (directKey) return directKey;
+
+  if (apiKeys && typeof apiKeys === 'object') {
+    const keyed = apiKeys[providerId];
+    if (typeof keyed === 'string' && keyed.trim()) return keyed.trim();
+  }
+
+  return String(provider?.apiKey || '').trim();
+}
+
+const MCP_TOOL_SPECS = [
+  {
+    name: 'calculator',
+    description: 'Safely evaluate a math expression. Supports Math functions such as sin, cos, sqrt, pow, log, round, PI, and E.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression: {
+          type: 'string',
+          description: 'The mathematical expression to evaluate, for example "sqrt(144) + 7 * 3".',
+        },
+      },
+      required: ['expression'],
+    },
+  },
+  {
+    name: 'get_current_time',
+    description: 'Return the current time for a requested IANA time zone.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timezone: {
+          type: 'string',
+          description: 'IANA timezone, for example Asia/Taipei or America/Los_Angeles.',
+        },
+      },
+    },
+  },
+  {
+    name: 'text_stats',
+    description: 'Count characters, words, lines, and estimated reading time for a piece of text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: {
+          type: 'string',
+          description: 'Text to analyze.',
+        },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'memory_search',
+    description: 'Search the user long-term memory bank supplied by the browser app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query for memory lookup.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'unit_convert',
+    description: 'Convert common units for temperature, length, weight, and data size.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        value: { type: 'number', description: 'Numeric value to convert.' },
+        from: { type: 'string', description: 'Source unit, e.g. c, f, km, mile, kg, lb, mb, gb.' },
+        to: { type: 'string', description: 'Target unit, e.g. c, f, km, mile, kg, lb, mb, gb.' },
+      },
+      required: ['value', 'from', 'to'],
+    },
+  },
+];
+
+function openAIToolDefinitions() {
+  return MCP_TOOL_SPECS.map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    },
+  }));
+}
+
+function publicToolList() {
+  return MCP_TOOL_SPECS.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  }));
+}
+
+function safeMath(expression) {
+  const raw = String(expression || '').trim();
+  if (!raw) throw new Error('Expression is required.');
+  if (raw.length > 300) throw new Error('Expression is too long.');
+  if (!/^[0-9A-Za-z_+\-*/%^().,\s]+$/.test(raw)) {
+    throw new Error('Expression contains unsupported characters.');
+  }
+
+  const allowedIdentifiers = new Set([
+    ...Object.getOwnPropertyNames(Math),
+    'PI',
+    'E',
+    'LN2',
+    'LN10',
+    'LOG2E',
+    'LOG10E',
+    'SQRT1_2',
+    'SQRT2',
+  ]);
+  const identifiers = raw.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+  for (const identifier of identifiers) {
+    if (!allowedIdentifiers.has(identifier)) {
+      throw new Error(`Unsupported identifier: ${identifier}`);
+    }
+  }
+
+  const expressionForJs = raw.replace(/\^/g, '**');
+  const mathNames = Object.getOwnPropertyNames(Math).filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+  const args = mathNames;
+  const values = mathNames.map((name) => Math[name]);
+  // The expression has already been constrained to numbers, math identifiers, and operators.
+  const fn = new Function(...args, `'use strict'; return (${expressionForJs});`);
+  const value = fn(...values);
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('Expression did not produce a finite number.');
+  }
+  return value;
+}
+
+function normalizeUnit(unit) {
+  return String(unit || '').trim().toLowerCase().replace(/s$/, '');
+}
+
+function convertUnit(value, from, to) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) throw new Error('value must be a finite number.');
+
+  const source = normalizeUnit(from);
+  const target = normalizeUnit(to);
+
+  const aliases = {
+    celsius: 'c',
+    fahrenheit: 'f',
+    kelvin: 'k',
+    kilometer: 'km',
+    kilometre: 'km',
+    meter: 'm',
+    metre: 'm',
+    centimeter: 'cm',
+    centimetre: 'cm',
+    mile: 'mi',
+    inch: 'in',
+    foot: 'ft',
+    feet: 'ft',
+    kilogram: 'kg',
+    gram: 'g',
+    pound: 'lb',
+    megabyte: 'mb',
+    gigabyte: 'gb',
+  };
+
+  const s = aliases[source] || source;
+  const t = aliases[target] || target;
+
+  if (['c', 'f', 'k'].includes(s) && ['c', 'f', 'k'].includes(t)) {
+    let celsius;
+    if (s === 'c') celsius = amount;
+    if (s === 'f') celsius = (amount - 32) * (5 / 9);
+    if (s === 'k') celsius = amount - 273.15;
+
+    if (t === 'c') return celsius;
+    if (t === 'f') return celsius * (9 / 5) + 32;
+    if (t === 'k') return celsius + 273.15;
+  }
+
+  const lengthToMeter = { km: 1000, m: 1, cm: 0.01, mm: 0.001, mi: 1609.344, ft: 0.3048, in: 0.0254 };
+  if (s in lengthToMeter && t in lengthToMeter) {
+    return (amount * lengthToMeter[s]) / lengthToMeter[t];
+  }
+
+  const weightToGram = { kg: 1000, g: 1, mg: 0.001, lb: 453.59237, oz: 28.349523125 };
+  if (s in weightToGram && t in weightToGram) {
+    return (amount * weightToGram[s]) / weightToGram[t];
+  }
+
+  const dataToByte = { b: 1, kb: 1000, mb: 1_000_000, gb: 1_000_000_000, kib: 1024, mib: 1024 ** 2, gib: 1024 ** 3 };
+  if (s in dataToByte && t in dataToByte) {
+    return (amount * dataToByte[s]) / dataToByte[t];
+  }
+
+  throw new Error(`Unsupported conversion: ${from} to ${to}`);
+}
+
+function scoreMemory(query, memory) {
+  const q = String(query || '').toLowerCase();
+  const text = String(memory?.text || memory || '').toLowerCase();
+  if (!q) return 1;
+  let score = 0;
+  for (const token of q.split(/[\s,.;:!?，。！？、]+/).filter(Boolean)) {
+    if (token.length < 2) continue;
+    if (text.includes(token)) score += token.length;
+  }
+  return score;
+}
+
+async function executeTool(name, args = {}, context = {}) {
+  const startedAt = Date.now();
+  let result;
+
+  if (name === 'calculator') {
+    const value = safeMath(args.expression);
+    result = {
+      expression: String(args.expression || '').trim(),
+      result: value,
+    };
+  } else if (name === 'get_current_time') {
+    const timezone = String(args.timezone || DEFAULT_TIME_ZONE).trim() || DEFAULT_TIME_ZONE;
+    const now = new Date();
+    const formatted = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      timeZoneName: 'short',
+    }).format(now);
+    result = {
+      timezone,
+      iso: now.toISOString(),
+      formatted,
+    };
+  } else if (name === 'text_stats') {
+    const text = String(args.text || '');
+    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    const characters = [...text].length;
+    const lines = text ? text.split(/\r?\n/).length : 0;
+    result = {
+      characters,
+      words,
+      lines,
+      estimatedReadingMinutes: words ? Number((words / 220).toFixed(2)) : 0,
+    };
+  } else if (name === 'memory_search') {
+    const memories = Array.isArray(context.memories) ? context.memories : [];
+    const matches = memories
+      .map((memory) => ({
+        id: memory?.id,
+        text: String(memory?.text || '').slice(0, 600),
+        tags: Array.isArray(memory?.tags) ? memory.tags : [],
+        score: scoreMemory(args.query, memory),
+      }))
+      .filter((memory) => memory.text && memory.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+    result = {
+      query: String(args.query || ''),
+      count: matches.length,
+      matches,
+    };
+  } else if (name === 'unit_convert') {
+    const converted = convertUnit(args.value, args.from, args.to);
+    result = {
+      value: Number(args.value),
+      from: args.from,
+      to: args.to,
+      result: Number(converted.toFixed(8)),
+    };
+  } else {
+    throw new Error(`Unknown tool: ${name}`);
+  }
+
+  return {
+    tool: name,
+    ok: true,
+    elapsedMs: Date.now() - startedAt,
+    result,
+  };
+}
+
+async function safeExecuteTool(name, args, context) {
+  try {
+    return await executeTool(name, args, context);
+  } catch (error) {
+    return {
+      tool: name,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function handleProviders(_req, res) {
   const providers = getProviders();
   sendJson(res, 200, { providers: publicProviders(providers) });
 }
 
+async function handleTools(_req, res) {
+  sendJson(res, 200, {
+    tools: publicToolList(),
+    mcp: {
+      manifest: '/mcp/manifest',
+      jsonRpc: '/mcp',
+      methods: ['initialize', 'tools/list', 'tools/call'],
+    },
+  });
+}
+
+async function handleToolCall(req, res) {
+  let parsedBody;
+  try {
+    const rawBody = await readRequestBody(req);
+    parsedBody = rawBody ? JSON.parse(rawBody) : {};
+  } catch (error) {
+    sendJson(res, 400, { error: error instanceof Error ? error.message : 'Invalid JSON body' });
+    return;
+  }
+
+  const result = await safeExecuteTool(parsedBody.name, parsedBody.arguments || parsedBody.args || {}, {
+    memories: Array.isArray(parsedBody.memories) ? parsedBody.memories : [],
+  });
+  sendJson(res, result.ok ? 200 : 400, result);
+}
+
+async function handleMcpManifest(_req, res) {
+  sendJson(res, 200, {
+    name: 'hw2-local-mcp',
+    version: '2.0.0',
+    description: 'Local MCP-style endpoint for HW2 demo: list/call tools used by the chat app.',
+    protocol: 'json-rpc-2.0',
+    endpoint: '/mcp',
+    capabilities: {
+      tools: true,
+      resources: false,
+      prompts: false,
+    },
+    tools: publicToolList(),
+  });
+}
+
+async function handleMcp(req, res) {
+  let rpc;
+  try {
+    const rawBody = await readRequestBody(req);
+    rpc = rawBody ? JSON.parse(rawBody) : {};
+  } catch (error) {
+    sendJson(res, 400, {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: error instanceof Error ? error.message : 'Parse error' },
+    });
+    return;
+  }
+
+  const id = rpc?.id ?? null;
+  const method = String(rpc?.method || '');
+
+  try {
+    if (method === 'initialize') {
+      sendJson(res, 200, {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'hw2-local-mcp', version: '2.0.0' },
+        },
+      });
+      return;
+    }
+
+    if (method === 'tools/list') {
+      sendJson(res, 200, {
+        jsonrpc: '2.0',
+        id,
+        result: { tools: publicToolList() },
+      });
+      return;
+    }
+
+    if (method === 'tools/call') {
+      const params = rpc.params || {};
+      const result = await safeExecuteTool(params.name, params.arguments || {}, {
+        memories: Array.isArray(params.memories) ? params.memories : [],
+      });
+      sendJson(res, 200, {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          isError: !result.ok,
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        },
+      });
+      return;
+    }
+
+    sendJson(res, 404, {
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32601, message: `Unknown MCP method: ${method}` },
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32000, message: error instanceof Error ? error.message : 'Tool error' },
+    });
+  }
+}
+
 async function handleHealth(_req, res) {
   sendJson(res, 200, {
     ok: true,
-    service: 'nebula-chat',
+    service: 'nebula-chat-hw2',
     time: new Date().toISOString(),
+    features: ['long-term-memory', 'multimodal', 'auto-routing', 'tool-use', 'mcp'],
   });
+}
+
+function parseToolArguments(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return { raw: String(raw) };
+  }
+}
+
+async function fetchUpstream(provider, apiKey, payload, signal) {
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  return fetch(buildChatUrl(provider.baseUrl), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+async function parseUpstreamJson(upstreamResponse) {
+  const bodyText = await upstreamResponse.text();
+  if (!upstreamResponse.ok) {
+    const error = new Error(bodyText || 'Upstream request failed');
+    error.statusCode = upstreamResponse.status;
+    error.contentType = upstreamResponse.headers.get('content-type') || 'text/plain; charset=utf-8';
+    error.bodyText = bodyText;
+    throw error;
+  }
+
+  try {
+    return bodyText ? JSON.parse(bodyText) : {};
+  } catch {
+    return {
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: bodyText,
+          },
+        },
+      ],
+    };
+  }
+}
+
+function sendUpstreamError(res, error, extraHeaders = {}) {
+  const statusCode = Number(error?.statusCode || 500);
+  const contentType = String(error?.contentType || 'text/plain; charset=utf-8');
+  const bodyText = String(error?.bodyText || error?.message || 'Unexpected server error');
+
+  if (contentType.includes('application/json')) {
+    try {
+      sendJson(res, statusCode, JSON.parse(bodyText), extraHeaders);
+      return;
+    } catch {
+      // Fall through to text.
+    }
+  }
+
+  sendText(res, statusCode, bodyText, contentType, extraHeaders);
+}
+
+function extractAssistantMessage(payload) {
+  return payload?.choices?.[0]?.message || null;
+}
+
+function extractAssistantText(payload) {
+  const message = extractAssistantMessage(payload);
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => (part?.type === 'text' ? part.text || '' : '')).join('');
+  }
+  return '';
+}
+
+async function handleChatWithTools({
+  provider,
+  apiKey,
+  model,
+  messages,
+  parameters,
+  signal,
+  routeDecision,
+  res,
+  toolContext,
+}) {
+  const routeHeader = { 'X-Route-Decision': headerJson(routeDecision) };
+  const loopMessages = [...messages];
+  const toolTrace = [];
+  let finalPayload = null;
+
+  for (let step = 0; step < MAX_TOOL_LOOPS; step += 1) {
+    const payload = {
+      model,
+      messages: loopMessages,
+      stream: false,
+      ...parameters,
+      tools: openAIToolDefinitions(),
+      tool_choice: 'auto',
+    };
+
+    const upstreamResponse = await fetchUpstream(provider, apiKey, payload, signal);
+    const data = await parseUpstreamJson(upstreamResponse);
+    finalPayload = data;
+    const assistantMessage = extractAssistantMessage(data);
+    const toolCalls = Array.isArray(assistantMessage?.tool_calls)
+      ? assistantMessage.tool_calls
+      : [];
+
+    if (!toolCalls.length) {
+      data.route_decision = routeDecision;
+      data.tool_trace = toolTrace;
+      sendJson(res, 200, data, routeHeader);
+      return;
+    }
+
+    loopMessages.push(assistantMessage);
+
+    for (const call of toolCalls) {
+      const toolName = call?.function?.name || call?.name || '';
+      const args = parseToolArguments(call?.function?.arguments || call?.arguments);
+      const result = await safeExecuteTool(toolName, args, toolContext);
+      toolTrace.push({
+        name: toolName,
+        arguments: args,
+        result,
+      });
+      loopMessages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        name: toolName,
+        content: JSON.stringify(result),
+      });
+    }
+  }
+
+  const finalResponse = await fetchUpstream(
+    provider,
+    apiKey,
+    {
+      model,
+      messages: loopMessages,
+      stream: false,
+      ...parameters,
+    },
+    signal
+  );
+  const finalData = await parseUpstreamJson(finalResponse);
+  finalData.route_decision = routeDecision;
+  finalData.tool_trace = toolTrace;
+  finalData.tool_loop_limit_reached = Boolean(finalPayload);
+  sendJson(res, 200, finalData, routeHeader);
 }
 
 async function handleChat(req, res) {
@@ -224,59 +1069,74 @@ async function handleChat(req, res) {
     model,
     messages,
     apiKey,
+    apiKeys,
     stream = true,
     parameters = {},
+    routing = {},
+    toolsEnabled = false,
+    mcpEnabled = false,
+    longTermMemories = [],
   } = parsedBody || {};
 
   const providers = getProviders();
-  const provider = providers[providerId];
+  const routeResolution = resolveRoute({
+    providerId,
+    model,
+    providers,
+    routing,
+    messages,
+    toolsEnabled,
+    mcpEnabled,
+  });
+  const provider = routeResolution.provider;
+  const selectedModel = routeResolution.model;
+  const routeDecision = routeResolution.decision;
+  const routeHeader = { 'X-Route-Decision': headerJson(routeDecision) };
 
   if (!provider) {
-    sendJson(res, 400, { error: 'Unknown provider' });
+    sendJson(res, 400, { error: 'Unknown provider' }, routeHeader);
     return;
   }
 
-  const effectiveApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  const effectiveApiKey = resolveApiKey(provider, provider.id, apiKey, apiKeys);
 
   if (provider.requiresKey && !effectiveApiKey) {
-    sendJson(res, 400, {
-      error: 'This provider requires an API key. Please provide it in the UI.',
-    });
+    sendJson(
+      res,
+      400,
+      {
+        error: `Provider ${provider.name} requires an API key. Enter it in the UI or .env.`,
+        route_decision: routeDecision,
+      },
+      routeHeader
+    );
     return;
   }
 
-  if (!model || typeof model !== 'string') {
-    sendJson(res, 400, { error: 'Model is required' });
+  if (!selectedModel || typeof selectedModel !== 'string') {
+    sendJson(res, 400, { error: 'Model is required', route_decision: routeDecision }, routeHeader);
     return;
   }
 
   if (!provider.baseUrl || typeof provider.baseUrl !== 'string') {
-    sendJson(res, 400, {
-      error: `Base URL is not configured for provider: ${provider.name}`,
-    });
+    sendJson(
+      res,
+      400,
+      {
+        error: `Base URL is not configured for provider: ${provider.name}`,
+        route_decision: routeDecision,
+      },
+      routeHeader
+    );
     return;
   }
 
   if (!Array.isArray(messages) || messages.length === 0) {
-    sendJson(res, 400, { error: 'Messages are required' });
+    sendJson(res, 400, { error: 'Messages are required', route_decision: routeDecision }, routeHeader);
     return;
   }
 
-  const upstreamPayload = {
-    model,
-    messages,
-    stream: Boolean(stream),
-    ...filterParameters(parameters),
-  };
-
-  const headers = {
-    'Content-Type': 'application/json',
-  };
-
-  if (effectiveApiKey) {
-    headers.Authorization = `Bearer ${effectiveApiKey}`;
-  }
-
+  const sanitizedParameters = filterParameters(parameters);
   const controller = new AbortController();
   const abortUpstream = () => {
     if (!controller.signal.aborted) {
@@ -288,12 +1148,36 @@ async function handleChat(req, res) {
   res.on('close', abortUpstream);
 
   try {
-    const upstreamResponse = await fetch(buildChatUrl(provider.baseUrl), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(upstreamPayload),
-      signal: controller.signal,
-    });
+    if (toolsEnabled || mcpEnabled) {
+      await handleChatWithTools({
+        provider,
+        apiKey: effectiveApiKey,
+        model: selectedModel,
+        messages,
+        parameters: sanitizedParameters,
+        signal: controller.signal,
+        routeDecision,
+        res,
+        toolContext: {
+          memories: Array.isArray(longTermMemories) ? longTermMemories : [],
+        },
+      });
+      return;
+    }
+
+    const upstreamPayload = {
+      model: selectedModel,
+      messages,
+      stream: Boolean(stream),
+      ...sanitizedParameters,
+    };
+
+    const upstreamResponse = await fetchUpstream(
+      provider,
+      effectiveApiKey,
+      upstreamPayload,
+      controller.signal
+    );
 
     if (!upstreamResponse.ok) {
       const contentType = upstreamResponse.headers.get('content-type') || '';
@@ -301,7 +1185,8 @@ async function handleChat(req, res) {
       if (contentType.includes('application/json')) {
         try {
           const parsed = JSON.parse(bodyText);
-          sendJson(res, upstreamResponse.status, parsed);
+          parsed.route_decision = routeDecision;
+          sendJson(res, upstreamResponse.status, parsed, routeHeader);
           return;
         } catch {
           // Ignore JSON parse error and fall through to text response.
@@ -312,7 +1197,8 @@ async function handleChat(req, res) {
         res,
         upstreamResponse.status,
         bodyText || 'Upstream request failed',
-        contentType || 'text/plain; charset=utf-8'
+        contentType || 'text/plain; charset=utf-8',
+        routeHeader
       );
       return;
     }
@@ -324,14 +1210,15 @@ async function handleChat(req, res) {
       if (contentType.includes('application/json')) {
         try {
           const parsed = JSON.parse(bodyText);
-          sendJson(res, 200, parsed);
+          parsed.route_decision = routeDecision;
+          sendJson(res, 200, parsed, routeHeader);
           return;
         } catch {
           // Continue to raw response when JSON parse fails.
         }
       }
 
-      sendText(res, 200, bodyText, contentType || 'text/plain; charset=utf-8');
+      sendText(res, 200, bodyText, contentType || 'text/plain; charset=utf-8', routeHeader);
       return;
     }
 
@@ -343,6 +1230,7 @@ async function handleChat(req, res) {
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
+      ...routeHeader,
     });
 
     if (!upstreamResponse.body) {
@@ -366,9 +1254,7 @@ async function handleChat(req, res) {
       return;
     }
 
-    sendJson(res, 500, {
-      error: error instanceof Error ? error.message : 'Unexpected server error',
-    });
+    sendUpstreamError(res, error, routeHeader);
   }
 }
 
@@ -383,6 +1269,26 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'GET' && pathname === '/api/providers') {
       await handleProviders(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/tools') {
+      await handleTools(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/tools/call') {
+      await handleToolCall(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/mcp/manifest') {
+      await handleMcpManifest(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/mcp') {
+      await handleMcp(req, res);
       return;
     }
 
@@ -410,5 +1316,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Chat is running on port ${PORT}`);
+  console.log(`HW2 chat is running on port ${PORT}`);
 });
