@@ -78,6 +78,7 @@ function getProviders() {
     openaiModels.find((model) => String(model).toLowerCase() === 'gpt-4o') ||
     firstMatchingModel(openaiModels, ['vision', '4o'], openaiBalanced);
   const openaiTool = process.env.OPENAI_TOOL_MODEL || openaiFast;
+  const openaiImage = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
 
   const clubFast = process.env.CLUB_FAST_MODEL || clubModels[1] || clubModels[0] || '';
   const clubBalanced = process.env.CLUB_BALANCED_MODEL || clubModels[0] || clubFast;
@@ -86,6 +87,7 @@ function getProviders() {
     firstMatchingModel(clubModels, ['397b', 'reason', 'qwen35'], clubBalanced);
   const clubVision = process.env.CLUB_VISION_MODEL || clubBalanced;
   const clubTool = process.env.CLUB_TOOL_MODEL || clubFast || clubBalanced;
+  const clubImage = process.env.CLUB_IMAGE_MODEL || '';
 
   return {
     openai: {
@@ -101,12 +103,14 @@ function getProviders() {
         reasoning: openaiReasoning,
         vision: openaiVision,
         tool: openaiTool,
+        image: openaiImage,
       },
       capabilities: {
         text: true,
         vision: true,
         tools: true,
         mcp: true,
+        imageGeneration: true,
       },
     },
     club: {
@@ -122,12 +126,14 @@ function getProviders() {
         reasoning: clubReasoning,
         vision: clubVision,
         tool: clubTool,
+        image: clubImage,
       },
       capabilities: {
         text: true,
         vision: String(process.env.CLUB_SUPPORTS_VISION || '').toLowerCase() === 'true',
         tools: true,
         mcp: true,
+        imageGeneration: String(process.env.CLUB_SUPPORTS_IMAGE_GENERATION || '').toLowerCase() === 'true',
       },
     },
   };
@@ -261,6 +267,10 @@ function filterParameters(parameters = {}) {
 
 function buildChatUrl(baseUrl) {
   return `${String(baseUrl || '').replace(/\/$/, '')}/chat/completions`;
+}
+
+function buildImageUrl(baseUrl) {
+  return `${String(baseUrl || '').replace(/\/$/, '')}/images/generations`;
 }
 
 function getRequestText(messages = []) {
@@ -915,6 +925,23 @@ async function fetchUpstream(provider, apiKey, payload, signal) {
   });
 }
 
+async function fetchImageUpstream(provider, apiKey, payload, signal) {
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  return fetch(buildImageUrl(provider.baseUrl), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
 async function parseUpstreamJson(upstreamResponse) {
   const bodyText = await upstreamResponse.text();
   if (!upstreamResponse.ok) {
@@ -970,6 +997,121 @@ function extractAssistantText(payload) {
     return content.map((part) => (part?.type === 'text' ? part.text || '' : '')).join('');
   }
   return '';
+}
+
+function resolveImageModel(provider, requestedModel) {
+  const normalized = String(requestedModel || '').trim();
+  if (/^(gpt-image|dall-e|chatgpt-image)/i.test(normalized)) {
+    return normalized;
+  }
+
+  return (
+    provider?.routes?.image ||
+    provider?.models?.find((model) => /^(gpt-image|dall-e|chatgpt-image)/i.test(String(model))) ||
+    normalized
+  );
+}
+
+function buildImageResponse(data, routeDecision, imageModel) {
+  const images = Array.isArray(data?.data)
+    ? data.data
+        .map((item, index) => {
+          const base64 = typeof item?.b64_json === 'string' ? item.b64_json.trim() : '';
+          if (!base64) return null;
+          return {
+            id: item?.id || `generated-image-${index + 1}`,
+            kind: 'image',
+            mimeType: 'image/png',
+            name: `generated-${index + 1}.png`,
+            dataUrl: `data:image/png;base64,${base64}`,
+            revisedPrompt: item?.revised_prompt || '',
+            size: 0,
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  return {
+    created: data?.created || Date.now(),
+    images,
+    output_text:
+      data?.data?.[0]?.revised_prompt ||
+      (images.length ? `Generated ${images.length} image${images.length > 1 ? 's' : ''}.` : ''),
+    route_decision: {
+      ...routeDecision,
+      model: imageModel,
+      route: 'image',
+      reason: 'image generation request',
+    },
+  };
+}
+
+async function handleImageGeneration({
+  provider,
+  apiKey,
+  model,
+  messages,
+  signal,
+  routeDecision,
+  res,
+}) {
+  if (!provider?.capabilities?.imageGeneration) {
+    sendJson(
+      res,
+      400,
+      {
+        error: `${provider?.name || 'This provider'} does not support image generation in this app.`,
+        route_decision: routeDecision,
+      },
+      { 'X-Route-Decision': headerJson(routeDecision) }
+    );
+    return;
+  }
+
+  const prompt = getLatestUserText(messages).trim();
+  if (!prompt) {
+    sendJson(
+      res,
+      400,
+      {
+        error: 'A text prompt is required to generate an image.',
+        route_decision: routeDecision,
+      },
+      { 'X-Route-Decision': headerJson(routeDecision) }
+    );
+    return;
+  }
+
+  const imageModel = resolveImageModel(provider, model);
+  if (!imageModel) {
+    sendJson(
+      res,
+      400,
+      {
+        error: 'No image model is configured. Set OPENAI_IMAGE_MODEL or enter an image model name.',
+        route_decision: routeDecision,
+      },
+      { 'X-Route-Decision': headerJson(routeDecision) }
+    );
+    return;
+  }
+
+  const upstreamPayload = {
+    model: imageModel,
+    prompt,
+    size: '1024x1024',
+  };
+
+  const upstreamResponse = await fetchImageUpstream(provider, apiKey, upstreamPayload, signal);
+  const data = await parseUpstreamJson(upstreamResponse);
+  sendJson(res, 200, buildImageResponse(data, routeDecision, imageModel), {
+    'X-Route-Decision': headerJson({
+      ...routeDecision,
+      model: imageModel,
+      route: 'image',
+      reason: 'image generation request',
+    }),
+  });
 }
 
 async function handleChatWithTools({
@@ -1071,6 +1213,7 @@ async function handleChat(req, res) {
     apiKey,
     apiKeys,
     stream = true,
+    generationMode = 'chat',
     parameters = {},
     routing = {},
     toolsEnabled = false,
@@ -1148,6 +1291,19 @@ async function handleChat(req, res) {
   res.on('close', abortUpstream);
 
   try {
+    if (generationMode === 'image') {
+      await handleImageGeneration({
+        provider,
+        apiKey: effectiveApiKey,
+        model: selectedModel,
+        messages,
+        signal: controller.signal,
+        routeDecision,
+        res,
+      });
+      return;
+    }
+
     if (toolsEnabled || mcpEnabled) {
       await handleChatWithTools({
         provider,

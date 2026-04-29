@@ -6,12 +6,13 @@ This project extends a normal chat UI into a complete LLM demo system with:
 
 - long-term memory
 - multimodal input
+- image generation
 - automatic model routing
 - local tool use
 - MCP-style tool endpoints
 - conversation branching, summary, export, theme switching, and local persistence
 
-The system supports both **OpenAI** and **any self-hosted / third-party provider** that exposes an OpenAI-compatible `/chat/completions` API, including self-hosted Qwen-based servers.
+The system supports both **OpenAI** and **any self-hosted / third-party provider** that exposes an OpenAI-compatible `/chat/completions` API, including self-hosted Qwen-based servers. For image generation, the provider also needs an OpenAI-compatible `/images/generations` endpoint.
 
 ---
 
@@ -49,7 +50,16 @@ The system supports both **OpenAI** and **any self-hosted / third-party provider
 - Attachment preview before sending
 - Attachment rendering inside chat history
 
-### 3. Auto Routing Between Models
+### 3. Image Generation
+
+- Supports prompt-to-image generation through OpenAI-compatible `/images/generations`
+- No dedicated image-mode toggle is required in the UI
+- Type `/image <prompt>` to force image generation
+- Natural prompts like `generate an image of ...` or `幫我畫一張...` are also auto-detected
+- Generated images are rendered directly inside assistant messages
+- Current implementation focuses on text-prompt image generation, not image editing
+
+### 4. Auto Routing Between Models
 
 - Manual or auto routing mode
 - Route types:
@@ -63,7 +73,7 @@ The system supports both **OpenAI** and **any self-hosted / third-party provider
 - Route pill shown below assistant replies
 - Route maps are configurable per provider through `.env`
 
-### 4. Tool Use
+### 5. Tool Use
 
 Built-in server-side local tools:
 
@@ -82,7 +92,7 @@ When tools are enabled, the server runs a tool loop:
 
 Tool traces are visible in the UI under `Tools used`.
 
-### 5. MCP
+### 6. MCP
 
 The project exposes a local MCP-style JSON-RPC interface for demo and testing:
 
@@ -97,7 +107,7 @@ Supported JSON-RPC methods:
 
 This allows the same local capability layer to be demonstrated both inside the chat UI and through a structured protocol interface.
 
-### 6. Other Useful Functions
+### 7. Other Useful Functions
 
 - multi-conversation management
 - branch from any message
@@ -128,6 +138,7 @@ Responsibilities:
 - persist settings / conversations / memories in `localStorage`
 - build request payloads
 - convert images into `image_url` content parts
+- detect image-generation intent from user prompts
 - select relevant long-term memories
 - display route, memory, and tool traces
 
@@ -145,6 +156,7 @@ Responsibilities:
 - resolve provider + model from `.env`
 - choose route in auto mode
 - execute local tool loop
+- call `/images/generations` when a request is recognized as image generation
 - forward requests to upstream OpenAI-compatible providers
 
 ### Data Flow
@@ -156,11 +168,14 @@ Responsibilities:
    - relevant long-term memories
    - attachments
    - routing / tool settings
-3. Frontend sends request to `/api/chat`.
-4. Backend resolves provider, route, and target model.
-5. Backend optionally runs local tool loop.
-6. Backend forwards request to upstream provider.
-7. Frontend renders answer plus route / memory / tool metadata.
+3. Frontend detects whether the request is a normal chat request or an image-generation request.
+4. Frontend sends request to `/api/chat`.
+5. Backend resolves provider, route, and target model.
+6. Backend optionally runs local tool loop.
+7. Backend forwards either:
+   - chat requests to `/chat/completions`
+   - image requests to `/images/generations`
+8. Frontend renders answer plus route / memory / tool metadata, and shows generated images inline when returned.
 
 ---
 
@@ -188,6 +203,7 @@ hw2/
 
 - Node.js 18+ recommended
 - one or more OpenAI-compatible `/chat/completions` providers
+- OpenAI-compatible `/images/generations` support if you want image generation
 - browser with modern JavaScript support
 
 For best experience:
@@ -195,6 +211,7 @@ For best experience:
 - Chrome / Edge for voice input demo
 - a provider with tool calling support
 - a provider with vision support if you want image routing demos
+- a provider with image generation support if you want `/image` or auto image prompts
 
 ---
 
@@ -215,6 +232,7 @@ Example:
 ```env
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your_key_here
+OPENAI_IMAGE_MODEL=gpt-image-1
 ```
 
 Or use your own self-hosted OpenAI-compatible server:
@@ -262,6 +280,7 @@ OPENAI_BALANCED_MODEL=gpt-4o
 OPENAI_REASONING_MODEL=gpt-4.1
 OPENAI_VISION_MODEL=gpt-4o
 OPENAI_TOOL_MODEL=gpt-4o-mini
+OPENAI_IMAGE_MODEL=gpt-image-1
 
 # ===== Self-hosted / compatible provider =====
 CLUB_BASE_URL=https://your-llama-server/v1
@@ -272,7 +291,9 @@ CLUB_BALANCED_MODEL=qwen35-397b
 CLUB_REASONING_MODEL=qwen35-397b
 CLUB_VISION_MODEL=qwen35-397b
 CLUB_TOOL_MODEL=qwen35-4b
+CLUB_IMAGE_MODEL=
 CLUB_SUPPORTS_VISION=false
+CLUB_SUPPORTS_IMAGE_GENERATION=false
 ```
 
 ### Notes
@@ -281,8 +302,12 @@ CLUB_SUPPORTS_VISION=false
 - The frontend no longer includes a manual API key input field.
 - If a provider requires a key, the UI will show whether the key was loaded from `.env`.
 - Different providers can define different route-model mappings.
+- `OPENAI_IMAGE_MODEL` defaults to `gpt-image-1` if omitted.
+- Self-hosted providers must explicitly declare `CLUB_SUPPORTS_IMAGE_GENERATION=true` before the frontend will allow image generation.
 - Tool mode disables streaming for that request because the server needs to finish the tool loop first.
+- Image generation also uses non-streaming responses in the current implementation.
 - Large images are converted to base64 data URLs, so avoid overly large files.
+- After changing `.env`, restart the Node server so provider capabilities are reloaded.
 
 ---
 
@@ -295,6 +320,7 @@ Each provider can define route-specific models:
 - `REASONING`
 - `VISION`
 - `TOOL`
+- `IMAGE`
 
 For example:
 
@@ -302,6 +328,7 @@ For example:
   - `gpt-4o-mini` for fast/tool
   - `gpt-4o` for balanced/vision
   - `gpt-4.1` for reasoning
+  - `gpt-image-1` for image generation
 - A self-hosted Qwen provider may use:
   - `qwen35-4b` for fast/tool
   - `qwen35-397b` for balanced/reasoning
@@ -322,7 +349,7 @@ Returns available local tools and MCP metadata.
 
 ### `POST /api/chat`
 
-Main chat endpoint.
+Main unified chat + image-generation endpoint.
 
 Responsibilities:
 
@@ -330,8 +357,15 @@ Responsibilities:
 - resolve provider
 - resolve route / model
 - run tool loop when enabled
-- forward to upstream provider
+- forward chat requests to `/chat/completions`
+- forward image-generation requests to `/images/generations`
 - return final model output plus route metadata
+
+Image-generation requests are triggered when the frontend detects prompts such as:
+
+- `/image a cinematic robot portrait`
+- `generate an image of a floating city at sunset`
+- `幫我畫一張賽博龐克風格的海報`
 
 ### `GET /mcp/manifest`
 
@@ -394,6 +428,20 @@ Before each request, the frontend scores stored memories against the latest user
 - read as text
 - appended into the user request as context
 - previewed in chat after sending
+
+### Image Generation Prompts
+
+To generate a new image, use one of these patterns:
+
+- `/image a watercolor cat reading in a library`
+- `generate an image of a minimal travel poster for Taipei`
+- `幫我畫一張未來感太空站插圖`
+
+Notes:
+
+- `/image ...` is the most reliable way to force image generation
+- image generation currently expects a text prompt only
+- if you attach files, the request is treated as normal multimodal chat instead of image generation
 
 ---
 
@@ -464,6 +512,16 @@ This endpoint is intentionally lightweight and local, making it easy to test dur
 
 ```text
 請描述這張圖片，並幫我整理成 3 個 demo 重點
+```
+
+### Image generation
+
+```text
+/image a cute shiba inu astronaut, cinematic lighting
+```
+
+```text
+幫我畫一張賽博龐克風格的台北捷運海報
 ```
 
 ### Tools

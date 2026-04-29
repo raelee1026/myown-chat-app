@@ -511,6 +511,10 @@ function syncSettingsToUI() {
   elements.presencePenaltyInput.value = String(state.settings.presencePenalty);
   elements.frequencyPenaltyInput.value = String(state.settings.frequencyPenalty);
   elements.streamToggle.checked = state.settings.stream;
+  if (elements.messageInput) {
+    elements.messageInput.placeholder =
+      'Type a message, attach image/text, or use /image <prompt> to generate an image';
+  }
 
   if (elements.routingModeSelect) elements.routingModeSelect.value = state.settings.routingMode;
   if (elements.routeProfileSelect) elements.routeProfileSelect.value = normalizeRouteProfile(state.settings.routeProfile);
@@ -907,6 +911,33 @@ function updateStatusText() {
   elements.chatStatus.textContent = `${providerName} / ${model} | ${routingLabel} | ${streamingLabel} | ${memoryLabel} | ${toolLabel}`;
 }
 
+function parseGenerationIntent(text, attachments = []) {
+  const raw = String(text || '').trim();
+  if (!raw || attachments.length) {
+    return { mode: 'chat', prompt: raw };
+  }
+
+  const slashMatch = raw.match(/^\/(?:image|img|draw)\s+([\s\S]+)/i);
+  if (slashMatch) {
+    return {
+      mode: 'image',
+      prompt: slashMatch[1].trim(),
+    };
+  }
+
+  const lower = raw.toLowerCase();
+  const looksLikeImagePrompt =
+    /^(generate|create|draw|illustrate|render|design)\b/.test(lower) ||
+    /\b(image|picture|photo|illustration|poster|logo|icon|sticker|avatar)\b/.test(lower) ||
+    /(生成|產生|畫|繪製|做|製作).*(圖片|圖像|照片|插圖|海報|logo|圖示|貼圖|頭像)/.test(raw) ||
+    /^(幫我畫|畫一張|畫個|生成一張|產生一張)/.test(raw);
+
+  return {
+    mode: looksLikeImagePrompt ? 'image' : 'chat',
+    prompt: raw,
+  };
+}
+
 function renderMessages() {
   elements.messages.innerHTML = '';
 
@@ -1254,6 +1285,21 @@ function extractAssistantText(payload) {
   return extractTextContent(choice?.message?.content) || '';
 }
 
+function extractGeneratedImages(payload) {
+  if (!Array.isArray(payload?.images)) return [];
+  return payload.images
+    .filter((image) => image && image.kind === 'image' && typeof image.dataUrl === 'string')
+    .map((image, index) => ({
+      id: image.id || `assistant-image-${index + 1}`,
+      kind: 'image',
+      dataUrl: image.dataUrl,
+      mimeType: image.mimeType || 'image/png',
+      name: image.name || `generated-${index + 1}.png`,
+      size: Number(image.size || 0),
+      revisedPrompt: image.revisedPrompt || '',
+    }));
+}
+
 function extractDeltaText(delta) {
   return extractTextContent(delta?.content) || '';
 }
@@ -1331,6 +1377,11 @@ function processSSEEvent(rawEvent, assistantMessage) {
 async function sendMessage(text) {
   hideError();
 
+  const attachments = state.pendingAttachments.map((attachment) => ({ ...attachment }));
+  const generationIntent = parseGenerationIntent(text, attachments);
+  const normalizedText = generationIntent.prompt;
+  const generationMode = generationIntent.mode;
+
   const selectedModel =
     state.settings.model.trim() ||
     getCurrentProvider()?.routes?.balanced ||
@@ -1342,14 +1393,23 @@ async function sendMessage(text) {
     return;
   }
 
-  const attachments = state.pendingAttachments.map((attachment) => ({ ...attachment }));
-  if (!String(text || '').trim() && !attachments.length) return;
+  if (!String(normalizedText || '').trim() && !attachments.length) return;
+  if (generationMode === 'image' && attachments.length) {
+    showError('Image generation currently supports text prompt only. Please clear attachments first.');
+    return;
+  }
 
-  const localRoute = decideLocalRoute(text, attachments);
+  const provider = getCurrentProvider();
+  if (generationMode === 'image' && !provider?.capabilities?.imageGeneration) {
+    showError(`${provider?.name || 'This provider'} is not configured for image generation.`);
+    return;
+  }
+
+  const localRoute = decideLocalRoute(normalizedText, attachments, generationMode);
   state.lastRouteDecision = localRoute;
   renderRouteDecision(localRoute);
 
-  const userMessage = createMessage('user', text, {
+  const userMessage = createMessage('user', normalizedText, {
     providerId: state.settings.providerId,
     attachments,
   });
@@ -1368,7 +1428,7 @@ async function sendMessage(text) {
 
   state.pendingAttachments = [];
   renderAttachmentPreview();
-  maybeAutoSaveMemory(text);
+  maybeAutoSaveMemory(normalizedText);
 
   state.messages.push(userMessage);
   state.messages.push(assistantMessage);
@@ -1379,11 +1439,16 @@ async function sendMessage(text) {
   scheduleRender();
   updateControls();
 
-  const effectiveStream = state.settings.stream && !state.settings.toolsEnabled && !state.settings.mcpEnabled;
+  const effectiveStream =
+    generationMode !== 'image' &&
+    state.settings.stream &&
+    !state.settings.toolsEnabled &&
+    !state.settings.mcpEnabled;
   const payload = {
     providerId: state.settings.providerId,
     model: selectedModel,
     stream: effectiveStream,
+    generationMode,
     routing: {
       mode: state.settings.routingMode,
       profile: normalizeRouteProfile(state.settings.routeProfile),
@@ -1434,13 +1499,16 @@ async function sendMessage(text) {
       await readStreamResponse(response, assistantMessage);
     } else {
       const data = await response.json();
+      assistantMessage.attachments = extractGeneratedImages(data);
       assistantMessage.content =
-        extractAssistantText(data) || '(No text content was returned by the model.)';
+        extractAssistantText(data) ||
+        data?.output_text ||
+        (assistantMessage.attachments?.length ? 'Generated image.' : '(No text content was returned by the model.)');
       assistantMessage.routeDecision = data.route_decision || assistantMessage.routeDecision;
       assistantMessage.toolTrace = Array.isArray(data.tool_trace) ? data.tool_trace : [];
     }
 
-    if (!assistantMessage.content.trim()) {
+    if (!assistantMessage.content.trim() && !assistantMessage.attachments?.length) {
       assistantMessage.content = '(Completed, but no displayable text was returned.)';
     }
   } catch (error) {
@@ -1739,7 +1807,7 @@ function parseRouteDecisionHeader(value) {
   }
 }
 
-function decideLocalRoute(text, attachments = []) {
+function decideLocalRoute(text, attachments = [], generationMode = 'chat') {
   const provider = getCurrentProvider();
   const routes = provider?.routes || {};
   const mode = state.settings.routingMode;
@@ -1755,6 +1823,17 @@ function decideLocalRoute(text, attachments = []) {
     content.length > 1600;
   let route = 'manual';
   let reason = 'manual provider/model selected';
+
+  if (generationMode === 'image') {
+    return {
+      mode,
+      route: 'image',
+      reason: 'image generation request detected',
+      model: routes.image || state.settings.model,
+      providerId: provider?.id || state.settings.providerId,
+      providerName: provider?.name || 'Provider',
+    };
+  }
 
   if (mode === 'auto') {
     if (hasImages) {
@@ -2140,7 +2219,8 @@ function renderMessageAttachments(attachments) {
 
     const caption = document.createElement('div');
     caption.className = 'message-attachment__caption';
-    caption.textContent = `${attachment.name || 'attachment'} · ${formatBytes(attachment.size || 0)}`;
+    const sizeText = Number(attachment.size || 0) > 0 ? ` · ${formatBytes(attachment.size || 0)}` : '';
+    caption.textContent = `${attachment.name || 'attachment'}${sizeText}`;
     card.appendChild(caption);
     wrap.appendChild(card);
   });

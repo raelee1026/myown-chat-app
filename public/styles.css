@@ -661,6 +661,7 @@ select {
 
   .composer__actions {
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
 }
 
